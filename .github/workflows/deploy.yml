@@ -1,6 +1,5 @@
-# Pipeline DEPLOY: executa somente após sucesso da pipeline Build
-# Trigger: workflow_run (Build concluída com sucesso)
-# feature/* -> dev | release/* -> stg | main -> prd
+# Pipeline DEPLOY: depende do Build (workflow_run). Seta imagem = nome:tag do repositório da app.
+# Regras de branch: feature/* -> dev | release/* -> stg | main -> prd
 
 name: Deploy
 
@@ -11,8 +10,8 @@ on:
       - completed
     branches:
       - main
-      - 'release/*'
       - 'feature/*'
+      - 'release/*'
 
 jobs:
   deploy:
@@ -26,7 +25,7 @@ jobs:
       CHART_APP: nginx
 
     steps:
-      - name: Checkout app repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
@@ -38,20 +37,14 @@ jobs:
           path: helm-templates
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determinar ambiente
+      - name: Determined Environment
         id: set-env
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
-          if [[ "$BRANCH" == "main" ]]; then
-            ENV="prd"
-          elif [[ "$BRANCH" =~ ^release/ ]]; then
-            ENV="stg"
-          elif [[ "$BRANCH" =~ ^feature/ ]]; then
-            ENV="dev"
-          else
-            echo "Branch não mapeada: $BRANCH"
-            exit 1
-          fi
+          if [[ "$BRANCH" == "main" ]]; then ENV="prd"
+          elif [[ "$BRANCH" =~ ^release/ ]]; then ENV="stg"
+          elif [[ "$BRANCH" =~ ^feature/ ]]; then ENV="dev"
+          else echo "Branch não mapeada: $BRANCH"; exit 1; fi
           echo "environment=$ENV" >> $GITHUB_OUTPUT
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
           echo "Deploy: $BRANCH -> $ENV"
@@ -61,23 +54,17 @@ jobs:
         with:
           version: 'v3.14.0'
 
-      - name: Gerar values da imagem do build (sem --set)
+      - name: Cluster Access
         run: |
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          IMAGE_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
-          IMAGE_REPO="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}"
-          # Todos os overrides em YAML; namespace já está em values por ambiente
-          cat <<EOF > deploy-values.yaml
-          library-web:
-            image:
-              repositoryOverride: "$IMAGE_REPO"
-              tagOverride: "$IMAGE_TAG"
-          EOF
-          sed -i 's/^          //' deploy-values.yaml
-          cat deploy-values.yaml
+          kubectl cluster-info
+          kubectl get nodes
 
-      - name: Deploy (install/upgrade)
+      - name: Install Or Upgrade 
         run: |
+          # Tag da imagem = env-SHA (mesmo SHA do Build que disparou este workflow)
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
           RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
@@ -85,16 +72,12 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
-          if helm list -n "$NAMESPACE" -q -f "^${RELEASE}$" | grep -q .; then
-            echo "Upgrade $RELEASE em $NAMESPACE"
-          else
-            echo "Install $RELEASE em $NAMESPACE"
-          fi
-
           helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
-            -f "$VALUES_BASE" -f "$VALUES_ENV" -f deploy-values.yaml \
+            -f "$VALUES_BASE" -f "$VALUES_ENV" \
+            --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
+            --set library-web.image.tagOverride="$NEW_TAG" \
             -n "$NAMESPACE" --create-namespace \
             --wait --timeout 5m
 
-          echo "Deploy concluído: $RELEASE"
+          echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
           helm list -n "$NAMESPACE"

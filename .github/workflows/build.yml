@@ -1,6 +1,5 @@
-# Pipeline BUILD: imagem Docker + Helm package
-# Triggers: push feature/* | pull_request release/*, main
-# Deploy só roda após sucesso desta pipeline (workflow deploy.yml)
+# Pipeline BUILD: imagem Docker + Helm package (app-version e version no momento do package)
+# Triggers: push | pull_request em main, feature/*, release/*
 
 name: Build
 
@@ -21,15 +20,15 @@ env:
   CHART_APP: nginx
 
 jobs:
-  build-and-package:
-    name: Docker build & Helm package
+  build:
+    name: Build & Package
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
 
     steps:
-      - name: Checkout app repo
+      - name: Checkout Repos
         uses: actions/checkout@v4
 
       - name: Checkout helm-templates
@@ -39,19 +38,14 @@ jobs:
           path: helm-templates
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determinar ambiente
+      - name: Determined Environment
         id: set-env
         run: |
           BRANCH="${{ github.head_ref || github.ref_name }}"
-          if [[ "$BRANCH" == "main" ]]; then
-            ENV="prd"
-          elif [[ "$BRANCH" =~ ^release/ ]]; then
-            ENV="stg"
-          elif [[ "$BRANCH" =~ ^feature/ ]]; then
-            ENV="dev"
-          else
-            ENV="dev"
-          fi
+          if [[ "$BRANCH" == "main" ]]; then ENV="prd"
+          elif [[ "$BRANCH" =~ ^release/ ]]; then ENV="stg"
+          elif [[ "$BRANCH" =~ ^feature/ ]]; then ENV="dev"
+          else ENV="dev"; fi
           echo "environment=$ENV" >> $GITHUB_OUTPUT
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
           echo "Branch: $BRANCH -> $ENV"
@@ -73,7 +67,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build e push imagem Docker
+      - name: Docker Build e Push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -92,40 +86,40 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
             -u ${{ github.actor }} --password-stdin
 
-      - name: Helm dependency update e package
-        id: helm-package
+      - name: Helm Package & Dependency Update
+        id: package
         run: |
           cd helm-templates
           cd apps/${{ env.CHART_APP }} && helm dependency update && cd ../..
           mkdir -p dist
-
-          # Versão para controle e auditoria: app-version = SHA do build, version = chart com build metadata
-          APP_VERSION="${{ github.sha }}"
+          BUILD_SOURCE_VERSION="${{ github.sha }}"
           BASE_VERSION=$(grep '^version:' apps/${{ env.CHART_APP }}/Chart.yaml | awk '{print $2}' | tr -d '"' | head -1)
-          CHART_VERSION="${BASE_VERSION}-${GITHUB_SHA::7}"
-
+          NEW_TAG="${BASE_VERSION}-${GITHUB_SHA:0:7}"
           helm package apps/${{ env.CHART_APP }} -d dist \
-            --app-version "$APP_VERSION" \
-            --version "$CHART_VERSION"
+            --app-version "$BUILD_SOURCE_VERSION" \
+            --version "$NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "app_version=$BUILD_SOURCE_VERSION" >> $GITHUB_OUTPUT
+          ########## validate path package #################
+          ls -lha dist/
+          ###################################################
 
-          echo "chart_version=$CHART_VERSION" >> $GITHUB_OUTPUT
-          echo "app_version=$APP_VERSION" >> $GITHUB_OUTPUT
-
-          helm lint apps/${{ env.CHART_APP }}
-
-          CHART_NAME=$(ls dist/*.tgz | head -1)
-          echo "chart_path=$CHART_NAME" >> $GITHUB_OUTPUT
-          ls -la dist/
-
-      - name: Push Helm chart para GHCR (OCI)
-        if: github.event_name == 'push'
+      - name: Lint dos charts
         run: |
           cd helm-templates
-          CHART=$(ls dist/*.tgz | head -1)
-          OCI_REF="oci://${{ env.REGISTRY }}/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/helm-charts"
-          helm push "$CHART" "$OCI_REF"
+          helm lint apps/${{ env.CHART_APP }}
 
-      - name: Upload chart artifact
+      - name: Helm Push Repo (OCI)
+        run: |
+          cd helm-templates
+          CHART_PATH=$(ls dist/*.tgz | head -1)
+          CHART_NAME=$(basename "$CHART_PATH")
+          echo "chartName=$CHART_NAME"
+          OCI_REF="oci://${{ env.REGISTRY }}/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/helm-charts"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            helm push "$CHART_PATH" "$OCI_REF"
+          fi
+      - name: Upload artifact 
         uses: actions/upload-artifact@v4
         with:
           name: helm-chart
