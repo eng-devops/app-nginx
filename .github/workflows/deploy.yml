@@ -72,12 +72,16 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
+          # Se o release existe mas recursos foram deletados no cluster (ex: "services ... not found"),
+          # --force recria os recursos. Em falha de upgrade, --cleanup-on-fail limpa recursos criados.
           helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
             --set library-web.image.tagOverride="$NEW_TAG" \
             -n "$NAMESPACE" --create-namespace \
-            --wait --timeout 5m
+            --wait --timeout 5m \
+            --force \
+            --cleanup-on-fail
 
           echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
           helm list -n "$NAMESPACE"
