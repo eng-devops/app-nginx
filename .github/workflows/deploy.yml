@@ -99,8 +99,14 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
+          # Em prd blue/green os slots não criam Ingress (evita conflito host/path); só o router (nginx-prd) cria.
+          HELM_SET_SLOT=""
+          if [[ -n "$SLOT" ]]; then
+            HELM_SET_SLOT="--set library-web.ingress.enabled=false"
+          fi
           helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
+            $HELM_SET_SLOT \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
             --set library-web.image.tagOverride="$NEW_TAG" \
             --set library-web.imagePullSecrets[0].name=ghcr-pull-secret \
