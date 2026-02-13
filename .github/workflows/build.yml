@@ -96,7 +96,7 @@ jobs:
         id: helm-package
         run: |
           cd helm-templates
-          cd apps/${{ env.CHART_APP }} && helm dependency update && cd ..
+          cd apps/${{ env.CHART_APP }} && helm dependency update && cd ../..
           mkdir -p dist
 
           # Versão para controle e auditoria: app-version = SHA do build, version = chart com build metadata
