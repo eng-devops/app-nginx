@@ -1,5 +1,6 @@
 # Pipeline DEPLOY: depende do Build (workflow_run). Seta imagem = nome:tag do repositório da app.
-# Regras de branch: feature/* -> dev | release/* -> stg | main -> prd
+# Regras: feature/* -> dev | release/* -> stg | main -> prd (Blue) | develop -> prd (Green)
+# prd usa blue/green: PR release/* -> develop = deploy Green | PR develop -> main = deploy Blue
 
 name: Deploy
 
@@ -10,6 +11,7 @@ on:
       - completed
     branches:
       - main
+      - develop
       - 'feature/*'
       - 'release/*'
 
@@ -44,13 +46,16 @@ jobs:
         id: set-env
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
-          if [[ "$BRANCH" == "main" ]]; then ENV="prd"
+          SLOT=""
+          if [[ "$BRANCH" == "main" ]]; then ENV="prd"; SLOT="blue"
+          elif [[ "$BRANCH" == "develop" ]]; then ENV="prd"; SLOT="green"
           elif [[ "$BRANCH" =~ ^release/ ]]; then ENV="stg"
           elif [[ "$BRANCH" =~ ^feature/ ]]; then ENV="dev"
           else echo "Branch não mapeada: $BRANCH"; exit 1; fi
           echo "environment=$ENV" >> $GITHUB_OUTPUT
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
-          echo "Deploy: $BRANCH -> $ENV"
+          echo "slot=$SLOT" >> $GITHUB_OUTPUT
+          echo "Deploy: $BRANCH -> $ENV${SLOT:+ (slot: $SLOT)}"
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -76,19 +81,24 @@ jobs:
 
       - name: Install Or Upgrade 
         run: |
-          # Tag da imagem = env-SHA (mesmo SHA do Build que disparou este workflow)
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
-          RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+          SLOT="${{ steps.set-env.outputs.slot }}"
+
+          # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
+          if [[ -n "$SLOT" ]]; then
+            RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}-$SLOT"
+          else
+            RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
+          fi
+
           VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
           VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
-          # Se o release existe mas recursos foram deletados no cluster (ex: "services ... not found"),
-          # --force recria os recursos. Em falha de upgrade, --cleanup-on-fail limpa recursos criados.
           helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
@@ -100,4 +110,18 @@ jobs:
             --cleanup-on-fail
 
           echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
+
+          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
+          if [[ -n "$SLOT" ]]; then
+            ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
+            helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+              -f "$VALUES_BASE" -f "$VALUES_ENV" \
+              --set library-web.blueGreen.routerService=true \
+              --set library-web.blueGreen.targetRelease="$RELEASE" \
+              --set library-web.fullnameOverride="$ROUTER_RELEASE" \
+              --set library-web.namespaceOverride="$NAMESPACE" \
+              -n "$NAMESPACE" --create-namespace
+            echo "Router $ROUTER_RELEASE atualizado -> slot $SLOT ($RELEASE)"
+          fi
+
           helm list -n "$NAMESPACE"
