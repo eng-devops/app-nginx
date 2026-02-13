@@ -1,0 +1,100 @@
+# Pipeline DEPLOY: executa somente após sucesso da pipeline Build
+# Trigger: workflow_run (Build concluída com sucesso)
+# feature/* -> dev | release/* -> stg | main -> prd
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types:
+      - completed
+    branches:
+      - main
+      - 'release/*'
+      - 'feature/*'
+
+jobs:
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: [self-hosted, linux]
+    if: github.event.workflow_run.conclusion == 'success'
+
+    env:
+      REGISTRY: ghcr.io
+      HELM_TEMPLATES_REPO: eng-devops/helm-templates
+      CHART_APP: nginx
+
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Checkout helm-templates
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HELM_TEMPLATES_REPO }}
+          path: helm-templates
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determinar ambiente
+        id: set-env
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          if [[ "$BRANCH" == "main" ]]; then
+            ENV="prd"
+          elif [[ "$BRANCH" =~ ^release/ ]]; then
+            ENV="stg"
+          elif [[ "$BRANCH" =~ ^feature/ ]]; then
+            ENV="dev"
+          else
+            echo "Branch não mapeada: $BRANCH"
+            exit 1
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "namespace=$ENV" >> $GITHUB_OUTPUT
+          echo "Deploy: $BRANCH -> $ENV"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Gerar values da imagem do build (sem --set)
+        run: |
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          IMAGE_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          IMAGE_REPO="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}"
+          # Todos os overrides em YAML; namespace já está em values por ambiente
+          cat <<EOF > deploy-values.yaml
+          library-web:
+            image:
+              repositoryOverride: "$IMAGE_REPO"
+              tagOverride: "$IMAGE_TAG"
+          EOF
+          sed -i 's/^          //' deploy-values.yaml
+          cat deploy-values.yaml
+
+      - name: Deploy (install/upgrade)
+        run: |
+          RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
+          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+          VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
+          VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
+
+          cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
+
+          if helm list -n "$NAMESPACE" -q -f "^${RELEASE}$" | grep -q .; then
+            echo "Upgrade $RELEASE em $NAMESPACE"
+          else
+            echo "Install $RELEASE em $NAMESPACE"
+          fi
+
+          helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+            -f "$VALUES_BASE" -f "$VALUES_ENV" -f deploy-values.yaml \
+            -n "$NAMESPACE" --create-namespace \
+            --wait --timeout 5m
+
+          echo "Deploy concluído: $RELEASE"
+          helm list -n "$NAMESPACE"
