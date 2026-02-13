@@ -18,6 +18,9 @@ jobs:
     name: Deploy to Kubernetes
     runs-on: [self-hosted, linux]
     if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: read   # necessário para o cluster poder pull da imagem no GHCR
 
     env:
       REGISTRY: ghcr.io
@@ -59,6 +62,18 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
+      - name: Create imagePullSecret
+        run: |
+          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            -n "$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
+
       - name: Install Or Upgrade 
         run: |
           # Tag da imagem = env-SHA (mesmo SHA do Build que disparou este workflow)
@@ -78,6 +93,7 @@ jobs:
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
             --set library-web.image.tagOverride="$NEW_TAG" \
+            --set library-web.imagePullSecrets[0].name=ghcr-pull-secret \
             -n "$NAMESPACE" --create-namespace \
             --wait --timeout 5m \
             --force \
