@@ -122,7 +122,8 @@ jobs:
         run: |
           cd helm-templates
           CHART=$(ls dist/*.tgz | head -1)
-          helm push "$CHART" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/helm-charts
+          OCI_REF="oci://${{ env.REGISTRY }}/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/helm-charts"
+          helm push "$CHART" "$OCI_REF"
 
       - name: Upload chart artifact
         uses: actions/upload-artifact@v4
