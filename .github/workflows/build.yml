@@ -1,5 +1,6 @@
 # Pipeline BUILD: imagem Docker + Helm package (app-version e version no momento do package)
-# Triggers: push | pull_request em main, feature/*, release/*
+# Triggers: push | pull_request em main, develop, feature/*, release/*
+# prd blue/green: develop -> Green | main -> Blue
 
 name: Build
 
@@ -7,11 +8,13 @@ on:
   push:
     branches:
       - main
+      - develop
       - 'feature/*'
       - 'release/*'
   pull_request:
     branches:
       - main
+      - develop
       - 'release/*'
 
 env:
@@ -43,6 +46,7 @@ jobs:
         run: |
           BRANCH="${{ github.head_ref || github.ref_name }}"
           if [[ "$BRANCH" == "main" ]]; then ENV="prd"
+          elif [[ "$BRANCH" == "develop" ]]; then ENV="prd"
           elif [[ "$BRANCH" =~ ^release/ ]]; then ENV="stg"
           elif [[ "$BRANCH" =~ ^feature/ ]]; then ENV="dev"
           else ENV="dev"; fi
