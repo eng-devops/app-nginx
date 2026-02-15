@@ -1,7 +1,7 @@
 # Pipeline BUILD: imagem Docker + Helm package (app-version e version no momento do package)
 # Triggers: push | pull_request em main, develop, feature/*, release/*
-# Versionamento semântico: apenas em release/* (major.minor.patch-rc) e main (major.minor.patch).
-# Conventional commits: Feat!: -> major | Feat: -> minor | Fix: -> patch
+# Versionamento: tag Git só na branch release/*. develop usa última tag; main usa versão final (última -rc sem sufixo).
+# Bump (apenas em release): Feat!: -> major | Feat: -> minor | Fix: -> patch. RC com contador: v0.1.0-rc, v0.1.0-rc.1...
 
 name: Build
 
@@ -56,12 +56,12 @@ jobs:
 
       - name: Compute semantic version
         id: semver
-        if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/')
+        if: github.ref_name == 'main' || github.ref_name == 'develop' || startsWith(github.ref_name, 'release/')
         run: |
           BRANCH="${{ github.ref_name }}"
-          VERSION=$(bash .github/scripts/semver.sh "$BRANCH")
+          VERSION=$(bash .github/scripts/semver.sh "$BRANCH" || true)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Computed version: $VERSION (branch: $BRANCH)"
+          echo "Computed version: ${VERSION:-'(nenhuma - usa env-sha)'} (branch: $BRANCH)"
 
       - name: Docker meta (tags)
         id: meta
@@ -147,8 +147,8 @@ jobs:
             helm push "$CHART_PATH" "$OCI_REF"
           fi
 
-      - name: Create and push Git tag (semver)
-        if: github.event_name == 'push' && steps.semver.outputs.version != ''
+      - name: Create and push Git tag (semver) — apenas na branch release
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'release/') && steps.semver.outputs.version != ''
         run: |
           VERSION="${{ steps.semver.outputs.version }}"
           TAG_NAME="v${VERSION}"

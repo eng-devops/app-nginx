@@ -58,14 +58,26 @@ jobs:
           echo "slot=$SLOT" >> $GITHUB_OUTPUT
           echo "Deploy: $BRANCH -> $ENV${SLOT:+ (slot: $SLOT)}"
 
-      - name: Compute semantic version (for image tag)
+      - name: Final Tag 
         id: semver
-        if: github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'release/')
+        if: github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'develop' || startsWith(github.event.workflow_run.head_branch, 'release/')
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
-          VERSION=$(bash .github/scripts/semver.sh "$BRANCH")
+          # Última tag que é ancestral do commit (a tag que veio da develop/release)
+          LATEST_TAG=$(git tag -l 'v*' --merged HEAD 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "Nenhuma tag encontrada, deploy usará env-sha"
+            exit 0
+          fi
+          VERSION="${LATEST_TAG#v}"
+          # Em main: usar versão final removendo o sufixo -rc
+          if [[ "$BRANCH" == "main" && "$VERSION" == *-rc* ]]; then
+            VERSION="${VERSION%-rc*}"
+            echo "Versão final (main): $VERSION"
+          else
+            echo "Tag da branch: $VERSION"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Image tag (semver): $VERSION"
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
