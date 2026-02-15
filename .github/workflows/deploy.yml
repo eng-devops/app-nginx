@@ -86,7 +86,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
 
-      - name: Install Or Upgrade 
+      - name: Helm Release Install
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
