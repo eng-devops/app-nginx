@@ -26,6 +26,8 @@ jobs:
   build:
     name: Build & Package
     runs-on: ubuntu-latest
+    # Não executar quando a branch for excluída (push com deleted: true)
+    if: github.event_name != 'push' || github.event.deleted != true
     permissions:
       contents: read
       packages: write

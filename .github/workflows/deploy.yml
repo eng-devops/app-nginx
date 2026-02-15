@@ -2,7 +2,7 @@
 # Regras: feature/* -> dev | release/* -> stg | main -> prd (Blue) | develop -> prd (Green)
 # prd usa blue/green: PR release/* -> develop = deploy Green | PR develop -> main = deploy Blue
 
-name: Deploy
+name: Deploy to Kubernetes
 
 on:
   workflow_run:
@@ -22,7 +22,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
-      packages: read   # necessário para o cluster poder pull da imagem no GHCR
+      packages: read  
 
     env:
       REGISTRY: ghcr.io
@@ -68,18 +68,22 @@ jobs:
           kubectl get nodes
 
       - name: Create imagePullSecret
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_PASS: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret docker-registry ghcr-pull-secret \
             --docker-server=ghcr.io \
-            --docker-username="${{ github.actor }}" \
-            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            --docker-username="$GHCR_USER" \
+            --docker-password="$GHCR_PASS" \
             -n "$NAMESPACE" \
             --dry-run=client -o yaml | kubectl apply -f -
           echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
 
-      - name: Install Or Upgrade 
+      - name: Helm Release Install
+        id: helm-release
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
@@ -99,7 +103,7 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
-          # Em prd blue/green os slots não criam Ingress (evita conflito host/path); só o router (nginx-prd) cria.
+          # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
           HELM_SET_SLOT=""
           if [[ -n "$SLOT" ]]; then
             HELM_SET_SLOT="--set library-web.ingress.enabled=false"
@@ -114,20 +118,7 @@ jobs:
             --wait --timeout 5m \
             --force \
             --cleanup-on-fail
-
+          echo "====================================================================="
           echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
+          echo "====================================================================="
 
-          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
-          if [[ -n "$SLOT" ]]; then
-            ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
-            helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
-              -f "$VALUES_BASE" -f "$VALUES_ENV" \
-              --set library-web.blueGreen.routerService=true \
-              --set library-web.blueGreen.targetRelease="$RELEASE" \
-              --set library-web.fullnameOverride="$ROUTER_RELEASE" \
-              --set library-web.namespaceOverride="$NAMESPACE" \
-              -n "$NAMESPACE" --create-namespace
-            echo "Router $ROUTER_RELEASE atualizado -> slot $SLOT ($RELEASE)"
-          fi
-
-          helm list -n "$NAMESPACE"
