@@ -17,7 +17,7 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to Kubernetes
+    name: Deploy to Kubernetes (${{ github.event.workflow_run.head_branch == 'main' && 'Blue' || github.event.workflow_run.head_branch == 'develop' && 'Green' || startsWith(github.event.workflow_run.head_branch, 'release/') && 'Stg' || 'Dev' }})
     runs-on: [self-hosted, linux]
     if: github.event.workflow_run.conclusion == 'success'
     permissions:
@@ -86,7 +86,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
 
-      - name: Helm Release Install
+      - name: Helm Release Install  
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
@@ -122,8 +122,6 @@ jobs:
             --force \
             --cleanup-on-fail
 
-          echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
-
           # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
           if [[ -n "$SLOT" ]]; then
             ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
@@ -134,7 +132,24 @@ jobs:
               --set library-web.fullnameOverride="$ROUTER_RELEASE" \
               --set library-web.namespaceOverride="$NAMESPACE" \
               -n "$NAMESPACE" --create-namespace
-            echo "Router $ROUTER_RELEASE atualizado -> slot $SLOT ($RELEASE)"
           fi
 
-          helm list -n "$NAMESPACE"
+          echo "RELEASE=$RELEASE" >> $GITHUB_ENV
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+
+      - name: Avalability Deploy 
+        run: |
+          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+          RELEASE="${{ env.RELEASE }}"
+          echo "Aguardando pods do release $RELEASE ficarem Ready..."
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/instance="$RELEASE" \
+            -n "$NAMESPACE" \
+            --timeout=300s
+          READY=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance="$RELEASE" --no-headers 2>/dev/null | grep -c Running || echo 0)
+          echo ""
+          echo "=============================================="
+          echo "Deploy concluído: $RELEASE"
+          echo "Imagem: ${{ env.IMAGE_NAME }}"
+          echo "Pods Ready: $READY"
+          echo "=============================================="
