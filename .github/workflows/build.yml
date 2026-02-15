@@ -8,9 +8,6 @@ on:
   push:
     branches:
       - 'feature/*'
-  pull_request:
-    types: [closed]
-    branches:
       - 'release/*'
       - develop
       - main
