@@ -116,11 +116,11 @@ jobs:
           mkdir -p dist
           BUILD_SOURCE_VERSION="${{ github.sha }}"
           BASE_VERSION=$(grep '^version:' apps/${{ env.CHART_APP }}/Chart.yaml | awk '{print $2}' | tr -d '"' | head -1)
-          # Em main/release usa versão semântica para chart e app; senão version-base-sha
+          # Em main/release/develop usa versão semântica; senão env-sha (igual ao deploy para pull OCI)
           if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
             NEW_TAG="${{ steps.semver.outputs.version }}"
           else
-            NEW_TAG="${BASE_VERSION}-${GITHUB_SHA:0:7}"
+            NEW_TAG="${{ steps.set-env.outputs.environment }}-${GITHUB_SHA:0:7}"
           fi
           helm package apps/${{ env.CHART_APP }} -d dist \
             --app-version "$NEW_TAG" \
