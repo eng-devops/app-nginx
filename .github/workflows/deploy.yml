@@ -103,7 +103,7 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
-          # Em prd blue/green os slots não criam Ingress (evita conflito host/path); só o router (nginx-prd) cria.
+          # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
           HELM_SET_SLOT=""
           if [[ -n "$SLOT" ]]; then
             HELM_SET_SLOT="--set library-web.ingress.enabled=false"
@@ -122,24 +122,3 @@ jobs:
           echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
           echo "====================================================================="
 
-          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
-          if [[ -n "$SLOT" ]]; then
-            ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
-            helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
-              -f "$VALUES_BASE" -f "$VALUES_ENV" \
-              --set library-web.blueGreen.routerService=true \
-              --set library-web.blueGreen.targetRelease="$RELEASE" \
-              --set library-web.fullnameOverride="$ROUTER_RELEASE" \
-              --set library-web.namespaceOverride="$NAMESPACE" \
-              -n "$NAMESPACE" --create-namespace
-
-            echo "====================================================================="  
-            echo "Router $ROUTER_RELEASE atualizado -> slot $SLOT ($RELEASE)"
-            echo "====================================================================="
-          
-          fi
-          
-          echo "====================================================================="
-          helm list -n "$NAMESPACE"
-          echo "====================================================================="
-      
