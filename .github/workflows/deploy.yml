@@ -79,6 +79,19 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+
+      - name: Download chart from Build
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart        
+          
+      - name: Debbug
+        run: |
+          echo "Files in current dir:"
+          ls -la
+          echo "Files in helm-chart dir:"
+          ls -la helm-chart
+
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
@@ -89,90 +102,93 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
             -u ${{ github.actor }} --password-stdin
 
-      - name: Pull chart from OCI (versão do Build)
-        id: chart
-        run: |
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
-            CHART_VERSION="${{ steps.semver.outputs.version }}"
-          else
-            CHART_VERSION="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
-          fi
-          OCI_REF="oci://${{ env.REGISTRY }}/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/helm-charts/${{ env.CHART_APP }}"
-          echo "Pulling chart $OCI_REF --version $CHART_VERSION"
-          helm pull "$OCI_REF" --version "$CHART_VERSION" --untar
-          # helm pull --untar extrai para um dir com o nome do chart (nginx)
-          echo "chart_path=${{ env.CHART_APP }}" >> $GITHUB_OUTPUT
-          echo "chart_version=$CHART_VERSION" >> $GITHUB_OUTPUT
+      
 
-      - name: Cluster Access
-        run: |
-          kubectl cluster-info
-          kubectl get nodes
+      # - name: Pull chart from OCI (versão do Build)
+      #   id: chart
+      #   run: |
+      #     HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+      #     if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
+      #       CHART_VERSION="${{ steps.semver.outputs.version }}"
+      #     else
+      #       BASE_VERSION=$(grep '^version:' helm-templates/apps/${{ env.CHART_APP }}/Chart.yaml | awk '{print $2}' | tr -d '"' | head -1)
+      #       CHART_VERSION="${BASE_VERSION}-dev.${HEAD_SHA:0:7}"
+      #     fi
+      #     OCI_REF="oci://${{ env.REGISTRY }}/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/helm-charts/${{ env.CHART_APP }}"
+      #     echo "Pulling chart $OCI_REF --version $CHART_VERSION"
+      #     helm pull "$OCI_REF" --version "$CHART_VERSION" --untar
+      #     # helm pull --untar extrai para um dir com o nome do chart (nginx)
+      #     echo "chart_path=${{ env.CHART_APP }}" >> $GITHUB_OUTPUT
+      #     echo "chart_version=$CHART_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Create imagePullSecret
-        env:
-          GHCR_USER: ${{ github.actor }}
-          GHCR_PASS: ${{ secrets.GHCR_PULL_TOKEN }}
-        run: |
-          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
-          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret docker-registry ghcr-pull-secret \
-            --docker-server=ghcr.io \
-            --docker-username="$GHCR_USER" \
-            --docker-password="$GHCR_PASS" \
-            -n "$NAMESPACE" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
+      # - name: Cluster Access
+      #   run: |
+      #     kubectl cluster-info
+      #     kubectl get nodes
 
-      - name: Helm Release Install
-        id: helm-release
-        run: |
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          # main/release/develop: tag da imagem = versão resolvida da tag Git; demais branches = env-sha
-          if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
-            NEW_TAG="${{ steps.semver.outputs.version }}"
-          else
-            NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
-          fi
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
-          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
-          SLOT="${{ steps.set-env.outputs.slot }}"
+      # - name: Create imagePullSecret
+      #   env:
+      #     GHCR_USER: ${{ github.actor }}
+      #     GHCR_PASS: ${{ secrets.GHCR_PULL_TOKEN }}
+      #   run: |
+      #     NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+      #     kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+      #     kubectl create secret docker-registry ghcr-pull-secret \
+      #       --docker-server=ghcr.io \
+      #       --docker-username="$GHCR_USER" \
+      #       --docker-password="$GHCR_PASS" \
+      #       -n "$NAMESPACE" \
+      #       --dry-run=client -o yaml | kubectl apply -f -
+      #     echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
 
-          # Chart puxado do OCI (mesma versão do Build)
-          CHART_PATH="${{ steps.chart.outputs.chart_path }}"
-          if [[ ! -d "$CHART_PATH" ]]; then
-            echo "::error::Chart não encontrado em $CHART_PATH (pull OCI)"
-            exit 1
-          fi
-          echo "Deployando chart: $CHART_PATH (version ${{ steps.chart.outputs.chart_version }})"
+      # - name: Helm Release Install
+      #   id: helm-release
+      #   run: |
+      #     HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+      #     # main/release/develop: tag da imagem = versão resolvida da tag Git; sem tag = base-dev.sha (do chart)
+      #     if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
+      #       NEW_TAG="${{ steps.semver.outputs.version }}"
+      #     else
+      #       NEW_TAG="${{ steps.chart.outputs.chart_version }}"
+      #     fi
+      #     IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
+      #     NAMESPACE="${{ steps.set-env.outputs.namespace }}"
+      #     SLOT="${{ steps.set-env.outputs.slot }}"
 
-          # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
-          if [[ -n "$SLOT" ]]; then
-            RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}-$SLOT"
-          else
-            RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
-          fi
+      #     # Chart puxado do OCI (mesma versão do Build)
+      #     CHART_PATH="${{ steps.chart.outputs.chart_path }}"
+      #     if [[ ! -d "$CHART_PATH" ]]; then
+      #       echo "::error::Chart não encontrado em $CHART_PATH (pull OCI)"
+      #       exit 1
+      #     fi
+      #     echo "Deployando chart: $CHART_PATH (version ${{ steps.chart.outputs.chart_version }})"
 
-          VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
-          VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
+      #     # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
+      #     if [[ -n "$SLOT" ]]; then
+      #       RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}-$SLOT"
+      #     else
+      #       RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
+      #     fi
 
-          # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
-          HELM_SET_SLOT=""
-          if [[ -n "$SLOT" ]]; then
-            HELM_SET_SLOT="--set library-web.ingress.enabled=false"
-          fi
-          helm upgrade --install "$RELEASE" "$CHART_PATH" \
-            -f "$VALUES_BASE" -f "$VALUES_ENV" \
-            $HELM_SET_SLOT \
-            --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
-            --set library-web.image.tagOverride="$NEW_TAG" \
-            --set library-web.imagePullSecrets[0].name=ghcr-pull-secret \
-            -n "$NAMESPACE" --create-namespace \
-            --wait --timeout 5m \
-            --force \
-            --cleanup-on-fail
-          echo "====================================================================="
-          echo "Deploy concluído: $RELEASE (chart: $CHART_PATH@${{ steps.chart.outputs.chart_version }}, imagem: $IMAGE_NAME)"
-          echo "====================================================================="
+      #     VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
+      #     VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
+
+      #     # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
+      #     HELM_SET_SLOT=""
+      #     if [[ -n "$SLOT" ]]; then
+      #       HELM_SET_SLOT="--set library-web.ingress.enabled=false"
+      #     fi
+      #     helm upgrade --install "$RELEASE" "$CHART_PATH" \
+      #       -f "$VALUES_BASE" -f "$VALUES_ENV" \
+      #       $HELM_SET_SLOT \
+      #       --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
+      #       --set library-web.image.tagOverride="$NEW_TAG" \
+      #       --set library-web.imagePullSecrets[0].name=ghcr-pull-secret \
+      #       -n "$NAMESPACE" --create-namespace \
+      #       --wait --timeout 5m \
+      #       --force \
+      #       --cleanup-on-fail
+      #     echo "====================================================================="
+      #     echo "Deploy concluído: $RELEASE (chart: $CHART_PATH@${{ steps.chart.outputs.chart_version }}, imagem: $IMAGE_NAME)"
+      #     echo "====================================================================="
 
