@@ -22,7 +22,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
-      packages: read  
+      packages: read
 
     env:
       REGISTRY: ghcr.io
@@ -79,15 +79,31 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+
+      - name: Download chart from Build
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }} 
+          path: helm-chart       
+          
+      - name: Debbug
+        run: |
+          echo "Files in current dir:"
+          ls -la
+          echo "Files in helm-chart dir:"
+          ls -la helm-chart
+
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
           version: 'v3.14.0'
 
-      - name: Cluster Access
+      - name: Login GHCR (Helm)
         run: |
-          kubectl cluster-info
-          kubectl get nodes
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            -u ${{ github.actor }} --password-stdin
 
       - name: Create imagePullSecret
         env:
@@ -108,7 +124,7 @@ jobs:
         id: helm-release
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          # main/release: tag da imagem = versão semântica; demais branches = env-sha
+          # main/release/develop: tag da imagem = versão resolvida da tag Git; demais branches = env-sha
           if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
             NEW_TAG="${{ steps.semver.outputs.version }}"
           else
@@ -117,6 +133,14 @@ jobs:
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           SLOT="${{ steps.set-env.outputs.slot }}"
+
+          # Chart gerado no Build (app-version e chart version corretos)
+          CHART_TGZ=$(ls helm-chart/*.tgz 2>/dev/null | head -1)
+          if [[ -z "$CHART_TGZ" || ! -f "$CHART_TGZ" ]]; then
+            echo "::error::Chart do Build não encontrado em helm-chart/*.tgz"
+            exit 1
+          fi
+          echo "Deployando chart: $CHART_TGZ"
 
           # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
           if [[ -n "$SLOT" ]]; then
@@ -128,14 +152,12 @@ jobs:
           VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
           VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
 
-          cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
-
           # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
           HELM_SET_SLOT=""
           if [[ -n "$SLOT" ]]; then
             HELM_SET_SLOT="--set library-web.ingress.enabled=false"
           fi
-          helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+          helm upgrade --install "$RELEASE" "$CHART_TGZ" \
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
             $HELM_SET_SLOT \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
@@ -146,6 +168,6 @@ jobs:
             --force \
             --cleanup-on-fail
           echo "====================================================================="
-          echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
+          echo "Deploy concluído: $RELEASE (chart: $CHART_TGZ, imagem: $IMAGE_NAME)"
           echo "====================================================================="
 
