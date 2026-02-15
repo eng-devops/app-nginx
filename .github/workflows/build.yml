@@ -64,7 +64,6 @@ jobs:
             type=sha,prefix=${{ steps.set-env.outputs.environment }}-
 
       - name: Login GHCR (Docker)
-        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
