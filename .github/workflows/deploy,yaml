@@ -79,7 +79,6 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-
       - name: Download chart from Build
         uses: actions/download-artifact@v4
         with:
