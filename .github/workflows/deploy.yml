@@ -156,16 +156,24 @@ jobs:
             --force \
             --cleanup-on-fail
 
-          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
+          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy.
+          # Ingress desabilitado no router para evitar falha do webhook (validate.nginx.ingress) quando inacessível.
+          # Quando o webhook estiver estável, remova --set library-web.ingress.enabled=false do router.
           if [[ -n "$SLOT" ]]; then
             ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
-            helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
-              -f "$VALUES_BASE" -f "$VALUES_ENV" \
-              --set library-web.blueGreen.routerService=true \
-              --set library-web.blueGreen.targetRelease="$RELEASE" \
-              --set library-web.fullnameOverride="$ROUTER_RELEASE" \
-              --set library-web.namespaceOverride="$NAMESPACE" \
-              -n "$NAMESPACE" --create-namespace
+            for i in 1 2 3; do
+              if helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+                -f "$VALUES_BASE" -f "$VALUES_ENV" \
+                --set library-web.blueGreen.routerService=true \
+                --set library-web.blueGreen.targetRelease="$RELEASE" \
+                --set library-web.fullnameOverride="$ROUTER_RELEASE" \
+                --set library-web.namespaceOverride="$NAMESPACE" \
+                --set library-web.ingress.enabled=false \
+                -n "$NAMESPACE" --create-namespace; then
+                break
+              fi
+              [[ $i -lt 3 ]] && echo "Tentativa $i do router falhou; nova tentativa em 20s..." && sleep 20
+            done
           fi
 
           echo "RELEASE=$RELEASE" >> $GITHUB_OUTPUT
