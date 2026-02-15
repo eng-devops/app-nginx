@@ -7,15 +7,13 @@ name: Build
 on:
   push:
     branches:
-      - main
-      - develop
       - 'feature/*'
-      - 'release/*'
   pull_request:
+    types: [closed]
     branches:
-      - main
-      - develop
       - 'release/*'
+      - develop
+      - main
 
 env:
   REGISTRY: ghcr.io
@@ -27,7 +25,7 @@ jobs:
     name: Build & Package
     runs-on: ubuntu-latest
     # Não executar quando a branch for excluída (push com deleted: true)
-    if: github.event_name != 'push' || github.event.deleted != true
+    if: github.event.deleted != true
     permissions:
       contents: read
       packages: write
