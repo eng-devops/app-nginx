@@ -1,6 +1,7 @@
 # Pipeline BUILD: imagem Docker + Helm package (app-version e version no momento do package)
 # Triggers: push | pull_request em main, develop, feature/*, release/*
-# prd blue/green: develop -> Green | main -> Blue
+# Versionamento semântico: apenas em release/* (major.minor.patch-rc) e main (major.minor.patch).
+# Conventional commits: Feat!: -> major | Feat: -> minor | Fix: -> patch
 
 name: Build
 
@@ -24,12 +25,14 @@ jobs:
     # Não executar quando a branch for excluída (push com deleted: true)
     if: github.event.deleted != true
     permissions:
-      contents: read
+      contents: write   # read + write para criar tag no repo
       packages: write
 
     steps:
       - name: Checkout Repos
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # histórico completo para cálculo de semver e tags
 
       - name: Checkout helm-templates
         uses: actions/checkout@v4
@@ -51,12 +54,32 @@ jobs:
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
           echo "Branch: $BRANCH -> $ENV"
 
+      - name: Compute semantic version
+        id: semver
+        if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/')
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          VERSION=$(bash .github/scripts/semver.sh "$BRANCH")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Computed version: $VERSION (branch: $BRANCH)"
+
       - name: Docker meta (tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}
           tags: |
+            type=ref,event=branch
+            type=sha,prefix=${{ steps.set-env.outputs.environment }}-
+
+      - name: Docker meta (tags with semver)
+        id: meta-semver
+        if: steps.semver.outputs.version != ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          tags: |
+            type=raw,value=${{ steps.semver.outputs.version }}
             type=ref,event=branch
             type=sha,prefix=${{ steps.set-env.outputs.environment }}-
 
@@ -72,8 +95,8 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.semver.outputs.version != '' && steps.meta-semver.outputs.tags || steps.meta.outputs.tags }}
+          labels: ${{ steps.semver.outputs.version != '' && steps.meta-semver.outputs.labels || steps.meta.outputs.labels }}
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -93,12 +116,17 @@ jobs:
           mkdir -p dist
           BUILD_SOURCE_VERSION="${{ github.sha }}"
           BASE_VERSION=$(grep '^version:' apps/${{ env.CHART_APP }}/Chart.yaml | awk '{print $2}' | tr -d '"' | head -1)
-          NEW_TAG="${BASE_VERSION}-${GITHUB_SHA:0:7}"
+          # Em main/release usa versão semântica para chart e app; senão version-base-sha
+          if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
+            NEW_TAG="${{ steps.semver.outputs.version }}"
+          else
+            NEW_TAG="${BASE_VERSION}-${GITHUB_SHA:0:7}"
+          fi
           helm package apps/${{ env.CHART_APP }} -d dist \
-            --app-version "$BUILD_SOURCE_VERSION" \
+            --app-version "$NEW_TAG" \
             --version "$NEW_TAG"
           echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-          echo "app_version=$BUILD_SOURCE_VERSION" >> $GITHUB_OUTPUT
+          echo "app_version=$NEW_TAG" >> $GITHUB_OUTPUT
           ########## validate path package #################
           ls -lha dist/
           ###################################################
@@ -118,6 +146,21 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" ]]; then
             helm push "$CHART_PATH" "$OCI_REF"
           fi
+
+      - name: Create and push Git tag (semver)
+        if: github.event_name == 'push' && steps.semver.outputs.version != ''
+        run: |
+          VERSION="${{ steps.semver.outputs.version }}"
+          TAG_NAME="v${VERSION}"
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists, skipping push"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG_NAME" -m "Release $VERSION"
+            git push origin "$TAG_NAME"
+          fi
+
       - name: Upload artifact 
         uses: actions/upload-artifact@v4
         with:

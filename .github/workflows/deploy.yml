@@ -33,7 +33,8 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
 
       - name: Checkout helm-templates
         uses: actions/checkout@v4
@@ -56,6 +57,15 @@ jobs:
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
           echo "slot=$SLOT" >> $GITHUB_OUTPUT
           echo "Deploy: $BRANCH -> $ENV${SLOT:+ (slot: $SLOT)}"
+
+      - name: Compute semantic version (for image tag)
+        id: semver
+        if: github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'release/')
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          VERSION=$(bash .github/scripts/semver.sh "$BRANCH")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Image tag (semver): $VERSION"
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -86,7 +96,12 @@ jobs:
         id: helm-release
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          # main/release: tag da imagem = versão semântica; demais branches = env-sha
+          if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
+            NEW_TAG="${{ steps.semver.outputs.version }}"
+          else
+            NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          fi
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           SLOT="${{ steps.set-env.outputs.slot }}"
