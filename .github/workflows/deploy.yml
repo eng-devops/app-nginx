@@ -35,6 +35,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          fetch-tags: true  # necessário para resolver tag (versão/imagem) em prd
 
       - name: Checkout helm-templates
         uses: actions/checkout@v4
