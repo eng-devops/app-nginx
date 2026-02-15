@@ -16,13 +16,40 @@ on:
       - 'release/*'
 
 jobs:
+  # Só segue com deploy se a branch que disparou o Build ainda existir (evita rodar ao excluir feature/* ou release/*).
+  check-branch:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    outputs:
+      branch_exists: ${{ steps.check.outputs.branch_exists }}
+    steps:
+      - name: Verificar se a branch ainda existe
+        id: check
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          # Branch com / precisa ser codificada na URL
+          BRANCH_ENC=$(printf '%s' "$BRANCH" | jq -sRr @uri)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/branches/${BRANCH_ENC}")
+          if [[ "$STATUS" == "200" ]]; then
+            echo "branch_exists=true" >> $GITHUB_OUTPUT
+            echo "Branch $BRANCH existe. Deploy será executado."
+          else
+            echo "branch_exists=false" >> $GITHUB_OUTPUT
+            echo "Branch $BRANCH não existe (excluída ou inexistente). Deploy ignorado."
+          fi
+
   deploy:
     name: Deploy to Kubernetes (${{ github.event.workflow_run.head_branch == 'main' && 'Blue' || github.event.workflow_run.head_branch == 'develop' && 'Green' || startsWith(github.event.workflow_run.head_branch, 'release/') && 'Stg' || 'Dev' }})
     runs-on: [self-hosted, linux]
-    if: github.event.workflow_run.conclusion == 'success'
+    needs: check-branch
+    if: github.event.workflow_run.conclusion == 'success' && needs.check-branch.outputs.branch_exists == 'true'
     permissions:
+      # necessário para verificar se a branch ainda existe
       contents: read
-      packages: read   # necessário para o cluster poder pull da imagem no GHCR
+      # necessário para o cluster poder pull da imagem no GHCR
+      packages: read   
 
     env:
       REGISTRY: ghcr.io
@@ -86,7 +113,8 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           echo "imagePullSecret ghcr-pull-secret criado/atualizado em $NAMESPACE"
 
-      - name: Helm Release Install  
+      - name: Helm Release Install
+        id: helm-release
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
@@ -134,13 +162,14 @@ jobs:
               -n "$NAMESPACE" --create-namespace
           fi
 
-          echo "RELEASE=$RELEASE" >> $GITHUB_ENV
-          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "RELEASE=$RELEASE" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_OUTPUT
 
-      - name: Avalability Deploy 
+      - name: Avalability Deploy
         run: |
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
-          RELEASE="${{ env.RELEASE }}"
+          RELEASE="${{ steps.helm-release.outputs.RELEASE }}"
+          IMAGE_NAME="${{ steps.helm-release.outputs.IMAGE_NAME }}"
           echo "Aguardando pods do release $RELEASE ficarem Ready..."
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/instance="$RELEASE" \
@@ -150,6 +179,6 @@ jobs:
           echo ""
           echo "=============================================="
           echo "Deploy concluído: $RELEASE"
-          echo "Imagem: ${{ env.IMAGE_NAME }}"
+          echo "Imagem: $IMAGE_NAME"
           echo "Pods Ready: $READY"
           echo "=============================================="
