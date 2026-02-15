@@ -85,7 +85,6 @@ jobs:
           version: 'v3.14.0'
 
       - name: Login GHCR (Helm)
-        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
             -u ${{ github.actor }} --password-stdin
