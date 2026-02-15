@@ -22,7 +22,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
-      packages: read  
+      packages: read
 
     env:
       REGISTRY: ghcr.io
@@ -79,21 +79,31 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+
       - name: Download chart from Build
         uses: actions/download-artifact@v4
         with:
           name: helm-chart
           run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }} 
+          path: helm-chart       
+          
+      - name: Debbug
+        run: |
+          echo "Files in current dir:"
+          ls -la
+          echo "Files in helm-chart dir:"
+          ls -la helm-chart
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
           version: 'v3.14.0'
 
-      - name: Cluster Access
+      - name: Login GHCR (Helm)
         run: |
-          kubectl cluster-info
-          kubectl get nodes
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            -u ${{ github.actor }} --password-stdin
 
       - name: Create imagePullSecret
         env:
@@ -160,4 +170,3 @@ jobs:
           echo "====================================================================="
           echo "Deploy concluído: $RELEASE (chart: $CHART_TGZ, imagem: $IMAGE_NAME)"
           echo "====================================================================="
-
