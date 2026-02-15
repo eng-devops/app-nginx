@@ -33,7 +33,8 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
 
       - name: Checkout helm-templates
         uses: actions/checkout@v4
@@ -56,6 +57,33 @@ jobs:
           echo "namespace=$ENV" >> $GITHUB_OUTPUT
           echo "slot=$SLOT" >> $GITHUB_OUTPUT
           echo "Deploy: $BRANCH -> $ENV${SLOT:+ (slot: $SLOT)}"
+
+      - name: Final Tag 
+        id: semver
+        if: github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'develop' || startsWith(github.event.workflow_run.head_branch, 'release/')
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          # Última tag que é ancestral do commit (a tag que veio da develop/release)
+          LATEST_TAG=$(git tag -l 'v*' --merged HEAD 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "Nenhuma tag encontrada, deploy usará env-sha"
+            exit 0
+          fi
+          VERSION="${LATEST_TAG#v}"
+          # Em main: usar versão final removendo o sufixo -rc
+          if [[ "$BRANCH" == "main" && "$VERSION" == *-rc* ]]; then
+            VERSION="${VERSION%-rc*}"
+            echo "Versão final (main): $VERSION"
+          else
+            echo "Tag da branch: $VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download chart from Build
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -86,10 +114,23 @@ jobs:
         id: helm-release
         run: |
           HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-          NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          # main/release/develop: tag da imagem = versão resolvida da tag Git; demais branches = env-sha
+          if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
+            NEW_TAG="${{ steps.semver.outputs.version }}"
+          else
+            NEW_TAG="${{ steps.set-env.outputs.environment }}-${HEAD_SHA:0:7}"
+          fi
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:$NEW_TAG"
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           SLOT="${{ steps.set-env.outputs.slot }}"
+
+          # Chart gerado no Build (app-version e chart version corretos)
+          CHART_TGZ=$(ls helm-chart/*.tgz 2>/dev/null | head -1)
+          if [[ -z "$CHART_TGZ" || ! -f "$CHART_TGZ" ]]; then
+            echo "::error::Chart do Build não encontrado em helm-chart/*.tgz"
+            exit 1
+          fi
+          echo "Deployando chart: $CHART_TGZ"
 
           # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
           if [[ -n "$SLOT" ]]; then
@@ -101,14 +142,12 @@ jobs:
           VALUES_BASE="helm-templates/apps/${{ env.CHART_APP }}/values.yaml"
           VALUES_ENV="helm-templates/apps/${{ env.CHART_APP }}/${{ steps.set-env.outputs.environment }}/values.yaml"
 
-          cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
-
           # Em prd instala-se apenas o slot (nginx-prd-blue ou nginx-prd-green); slots sem Ingress (evita conflito).
           HELM_SET_SLOT=""
           if [[ -n "$SLOT" ]]; then
             HELM_SET_SLOT="--set library-web.ingress.enabled=false"
           fi
-          helm upgrade --install "$RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+          helm upgrade --install "$RELEASE" "$CHART_TGZ" \
             -f "$VALUES_BASE" -f "$VALUES_ENV" \
             $HELM_SET_SLOT \
             --set library-web.image.repositoryOverride="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
@@ -119,6 +158,6 @@ jobs:
             --force \
             --cleanup-on-fail
           echo "====================================================================="
-          echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
+          echo "Deploy concluído: $RELEASE (chart: $CHART_TGZ, imagem: $IMAGE_NAME)"
           echo "====================================================================="
 
