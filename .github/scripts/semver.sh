@@ -11,19 +11,20 @@
 set -e
 BRANCH="${1:-}"
 
-# ---------- RELEASE: calcular próxima versão com bump + -rc (e contador se já existir)
+# ---------- RELEASE: calcular próxima versão com bump + -rc (sem contador; tag só se não existir)
+# Base sempre inicia em 0.0.0; primeiro push na release = minor → v0.1.0-rc
 if [[ "$BRANCH" =~ ^release ]]; then
-  # Última tag semver (v1.2.3 ou v1.2.3-rc ou v1.2.3-rc.1)
-  LATEST_TAG=$(git tag -l 'v*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-rc(\.[0-9]+)?)?$' | sort -V | tail -1 || true)
+  # Última tag semver (v1.2.3 ou v1.2.3-rc)
+  LATEST_TAG=$(git tag -l 'v*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-rc)?$' | sort -V | tail -1 || true)
 
   if [[ -z "$LATEST_TAG" ]]; then
     MAJOR=0
-    MINOR=1
+    MINOR=0
     PATCH=0
     RANGE=""
   else
     BASE="${LATEST_TAG#v}"
-    BASE="${BASE%-rc*}"
+    BASE="${BASE%-rc}"
     IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
     MAJOR=${MAJOR:-0}
     MINOR=${MINOR:-0}
@@ -31,7 +32,7 @@ if [[ "$BRANCH" =~ ^release ]]; then
     RANGE="${LATEST_TAG}..HEAD"
   fi
 
-  # Commits desde a última tag (ou só o último commit se não há tag)
+  # Commits desde a última tag (ou último commit se não há tag)
   if [[ -z "$RANGE" ]]; then
     COMMITS=$(git log --oneline -1 2>/dev/null || true)
     FULL_LOG=$(git log -1 --format="%s %b" 2>/dev/null || true)
@@ -40,8 +41,11 @@ if [[ "$BRANCH" =~ ^release ]]; then
     FULL_LOG=$(git log "$RANGE" --format="%s %b" 2>/dev/null || true)
   fi
 
-  # Bump: Feat!: major | Feat: minor | Fix: patch
+  # Bump: Feat!: major | Feat: minor | Fix: patch. Sem tag = primeiro release → minor (v0.1.0-rc)
   BUMP="patch"
+  if [[ -z "$LATEST_TAG" && -n "$FULL_LOG" ]]; then
+    BUMP="minor"
+  fi
   if [[ -n "$FULL_LOG" ]]; then
     if echo "$FULL_LOG" | grep -qiE 'Feat!:|feat!:|BREAKING CHANGE'; then
       BUMP="major"
@@ -59,13 +63,8 @@ if [[ "$BRANCH" =~ ^release ]]; then
   esac
 
   NEW_BASE="${MAJOR}.${MINOR}.${PATCH}"
-  # Contador de RCs para esta base: v0.2.0-rc, v0.2.0-rc.1, v0.2.0-rc.2...
-  RC_COUNT=$(git tag -l "v${NEW_BASE}-rc*" 2>/dev/null | wc -l)
-  if [[ "$RC_COUNT" -eq 0 ]]; then
-    VERSION="${NEW_BASE}-rc"
-  else
-    VERSION="${NEW_BASE}-rc.${RC_COUNT}"
-  fi
+  # Uma única tag por versão: v0.1.0-rc (sem .1, .2); não criar de novo se já existir
+  VERSION="${NEW_BASE}-rc"
   echo "$VERSION"
   exit 0
 fi

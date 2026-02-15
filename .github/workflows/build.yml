@@ -1,7 +1,8 @@
 # Pipeline BUILD: imagem Docker + Helm package (app-version e version no momento do package)
 # Triggers: push | pull_request em main, develop, feature/*, release/*
-# Versionamento: tag Git só na branch release/*. develop usa última tag; main usa versão final (última -rc sem sufixo).
-# Bump (apenas em release): Feat!: -> major | Feat: -> minor | Fix: -> patch. RC com contador: v0.1.0-rc, v0.1.0-rc.1...
+# Versionamento: tag Git só na release/*. Base 0.0.0; primeiro push release = v0.1.0-rc (minor).
+# Promote: merge para develop move a tag -rc; merge para main cria tag final vX.Y.Z.
+# Sem tag: fallback 0.0.0-dev.sha (válido para Helm/Docker).
 
 name: Build
 
@@ -116,11 +117,11 @@ jobs:
           mkdir -p dist
           BUILD_SOURCE_VERSION="${{ github.sha }}"
           BASE_VERSION=$(grep '^version:' apps/${{ env.CHART_APP }}/Chart.yaml | awk '{print $2}' | tr -d '"' | head -1)
-          # Em main/release usa versão semântica para chart e app; senão version-base-sha
+          # Em main/release/develop usa versão semântica; sem tag usa app-version (Chart.yaml) como base: base-dev.sha
           if [[ -n "${{ steps.semver.outputs.version }}" ]]; then
             NEW_TAG="${{ steps.semver.outputs.version }}"
           else
-            NEW_TAG="${BASE_VERSION}-${GITHUB_SHA:0:7}"
+            NEW_TAG="${BASE_VERSION}-dev.${GITHUB_SHA:0:7}"
           fi
           helm package apps/${{ env.CHART_APP }} -d dist \
             --app-version "$NEW_TAG" \
@@ -161,8 +162,48 @@ jobs:
             git push origin "$TAG_NAME"
           fi
 
-      - name: Upload artifact 
+      - name: Promote tag to develop (mover -rc para o commit do merge)
+        if: github.event_name == 'push' && github.ref_name == 'develop'
+        run: |
+          RC_TAG=$(git tag -l 'v*.*.*-rc' --merged HEAD 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$RC_TAG" ]]; then
+            echo "Nenhuma tag -rc encontrada, nada a promover"
+            exit 0
+          fi
+          if [[ $(git rev-parse "$RC_TAG") == $(git rev-parse HEAD) ]]; then
+            echo "Tag $RC_TAG já aponta para este commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git push origin --delete "$RC_TAG" 2>/dev/null || true
+          git tag -a "$RC_TAG" -m "Promote to develop"
+          git push origin "$RC_TAG"
+          echo "Tag $RC_TAG movida para commit do develop"
+
+      - name: Promote tag to main (criar versão final vX.Y.Z)
+        if: github.event_name == 'push' && github.ref_name == 'main'
+        run: |
+          RC_TAG=$(git tag -l 'v*.*.*-rc' --merged HEAD 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$RC_TAG" ]]; then
+            echo "Nenhuma tag -rc encontrada, nada a promover"
+            exit 0
+          fi
+          VERSION="${RC_TAG#v}"
+          VERSION="${VERSION%-rc}"
+          FINAL_TAG="v${VERSION}"
+          if git rev-parse "$FINAL_TAG" >/dev/null 2>&1; then
+            echo "Tag $FINAL_TAG já existe"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$FINAL_TAG" -m "Release $VERSION"
+          git push origin "$FINAL_TAG"
+          echo "Tag $FINAL_TAG criada na main"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: helm-chart
-          path: helm-templates/dist/*.tgz
+          path: helm-templates/dist
