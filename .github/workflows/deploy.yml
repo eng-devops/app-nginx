@@ -22,7 +22,8 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
-      packages: read  
+      packages: read
+      actions: read   # necessário para baixar artifact do workflow Build (run-id)  
 
     env:
       REGISTRY: ghcr.io

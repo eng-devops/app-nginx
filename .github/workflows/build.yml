@@ -161,8 +161,8 @@ jobs:
             git push origin "$TAG_NAME"
           fi
 
-      - name: Upload artifact 
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: helm-chart
-          path: helm-templates/dist/*.tgz
+          path: helm-templates/dist
