@@ -2,7 +2,7 @@
 # Regras: feature/* -> dev | release/* -> stg | main -> prd (Blue) | develop -> prd (Green)
 # prd usa blue/green: PR release/* -> develop = deploy Green | PR develop -> main = deploy Blue
 
-name: Deploy
+name: Deploy to Kubernetes
 
 on:
   workflow_run:
@@ -16,45 +16,13 @@ on:
       - 'release/*'
 
 jobs:
-  # Só segue com deploy se a branch que disparou o Build ainda existir (evita rodar ao excluir feature/* ou release/*).
-  check-branch:
-    runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success'
-    # necessário para verificar se a branch ainda existe
-    permissions:
-      contents: read
-    # necessário para o output branch_exists
-    outputs:
-      branch_exists: ${{ steps.check.outputs.branch_exists }}
-    steps:
-      - name: Verificar se a branch ainda existe
-        id: check
-        run: |
-          BRANCH="${{ github.event.workflow_run.head_branch }}"
-          # Branch com / precisa ser codificada na URL
-          BRANCH_ENC=$(printf '%s' "$BRANCH" | jq -sRr @uri)
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/branches/${BRANCH_ENC}")
-          if [[ "$STATUS" == "200" ]]; then
-            echo "branch_exists=true" >> $GITHUB_OUTPUT
-            echo "Branch $BRANCH existe. Deploy será executado."
-          else
-            echo "branch_exists=false" >> $GITHUB_OUTPUT
-            echo "Branch $BRANCH não existe (excluída ou inexistente). Deploy ignorado."
-          fi
-
   deploy:
-    name: Deploy to Kubernetes (${{ github.event.workflow_run.head_branch == 'main' && 'Blue' || github.event.workflow_run.head_branch == 'develop' && 'Green' || startsWith(github.event.workflow_run.head_branch, 'release/') && 'Stg' || 'Dev' }})
+    name: Deploy to Kubernetes
     runs-on: [self-hosted, linux]
-    needs: check-branch
-    if: github.event.workflow_run.conclusion == 'success' && needs.check-branch.outputs.branch_exists == 'true'
+    if: github.event.workflow_run.conclusion == 'success'
     permissions:
-      # necessário para verificar se a branch ainda existe
       contents: read
-      # necessário para o cluster poder pull da imagem no GHCR
-      packages: read   
+      packages: read  
 
     env:
       REGISTRY: ghcr.io
@@ -101,14 +69,10 @@ jobs:
 
       - name: Create imagePullSecret
         env:
-          # PAT com read:packages evita 403 quando vários pods puxam em paralelo (rate limit do GITHUB_TOKEN).
-          # Opcional: criar secret GHCR_PULL_TOKEN no repositório com um PAT; senão usa GITHUB_TOKEN.
           GHCR_USER: ${{ github.actor }}
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-          GITHUB_TOKEN_FALLBACK: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PASS: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
-          GHCR_PASS="${GHCR_PULL_TOKEN:-$GITHUB_TOKEN_FALLBACK}"
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret docker-registry ghcr-pull-secret \
             --docker-server=ghcr.io \
@@ -127,8 +91,7 @@ jobs:
           NAMESPACE="${{ steps.set-env.outputs.namespace }}"
           SLOT="${{ steps.set-env.outputs.slot }}"
 
-          # Em prd: só existem slots (blue/green). Nunca fazer deploy de release "nginx-prd" com Deployment completo.
-          # main -> RELEASE=nginx-prd-blue | develop -> RELEASE=nginx-prd-green | dev/stg -> nginx-dev / nginx-stg
+          # prd blue/green: release = nginx-prd-blue ou nginx-prd-green; caso contrário nginx-<env>
           if [[ -n "$SLOT" ]]; then
             RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}-$SLOT"
           else
@@ -140,7 +103,7 @@ jobs:
 
           cd helm-templates/apps/${{ env.CHART_APP }} && helm dependency update && cd ../../..
 
-          # prd blue/green: slots não criam Ingress; só o router (nginx-prd) cria. Um único deploy por run: slot + router.
+          # Em prd blue/green os slots não criam Ingress (evita conflito host/path); só o router (nginx-prd) cria.
           HELM_SET_SLOT=""
           if [[ -n "$SLOT" ]]; then
             HELM_SET_SLOT="--set library-web.ingress.enabled=false"
@@ -155,45 +118,28 @@ jobs:
             --wait --timeout 5m \
             --force \
             --cleanup-on-fail
+          echo "====================================================================="
+          echo "Deploy concluído: $RELEASE (imagem: $IMAGE_NAME)"
+          echo "====================================================================="
 
-          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy.
-          # Ingress desabilitado no router para evitar falha do webhook (validate.nginx.ingress) quando inacessível.
-          # Quando o webhook estiver estável, remova --set library-web.ingress.enabled=false do router.
+          # prd blue/green: atualizar router Service para apontar para o slot que acabou de receber o deploy
           if [[ -n "$SLOT" ]]; then
             ROUTER_RELEASE="${{ env.CHART_APP }}-${{ steps.set-env.outputs.environment }}"
-            for i in 1 2 3; do
-              if helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
-                -f "$VALUES_BASE" -f "$VALUES_ENV" \
-                --set library-web.blueGreen.routerService=true \
-                --set library-web.blueGreen.targetRelease="$RELEASE" \
-                --set library-web.fullnameOverride="$ROUTER_RELEASE" \
-                --set library-web.namespaceOverride="$NAMESPACE" \
-                --set library-web.ingress.enabled=false \
-                -n "$NAMESPACE" --create-namespace; then
-                break
-              fi
-              [[ $i -lt 3 ]] && echo "Tentativa $i do router falhou; nova tentativa em 20s..." && sleep 20
-            done
-          fi
+            helm upgrade --install "$ROUTER_RELEASE" helm-templates/apps/${{ env.CHART_APP }} \
+              -f "$VALUES_BASE" -f "$VALUES_ENV" \
+              --set library-web.blueGreen.routerService=true \
+              --set library-web.blueGreen.targetRelease="$RELEASE" \
+              --set library-web.fullnameOverride="$ROUTER_RELEASE" \
+              --set library-web.namespaceOverride="$NAMESPACE" \
+              -n "$NAMESPACE" --create-namespace
 
-          echo "RELEASE=$RELEASE" >> $GITHUB_OUTPUT
-          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_OUTPUT
-
-      - name: Avalability Deploy
-        run: |
-          NAMESPACE="${{ steps.set-env.outputs.namespace }}"
-          RELEASE="${{ steps.helm-release.outputs.RELEASE }}"
-          IMAGE_NAME="${{ steps.helm-release.outputs.IMAGE_NAME }}"
-          echo "Aguardando pods do release $RELEASE ficarem Ready..."
-          kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/instance="$RELEASE" \
-            -n "$NAMESPACE" \
-            --timeout=300s
-          READY=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance="$RELEASE" --no-headers 2>/dev/null | grep -c Running || echo 0)
-          echo ""
-          echo "=============================================="
-          echo "Deploy concluído: $RELEASE"
-          echo "Imagem: $IMAGE_NAME"
-          echo "Pods Ready: $READY"
-          echo "=============================================="
+            echo "====================================================================="  
+            echo "Router $ROUTER_RELEASE atualizado -> slot $SLOT ($RELEASE)"
+            echo "====================================================================="
           
+          fi
+          
+          echo "====================================================================="
+          helm list -n "$NAMESPACE"
+          echo "====================================================================="
+      
